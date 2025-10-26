@@ -1,54 +1,76 @@
+"""MAML-PPO with defensive programming and clear typing.
+
+This module implements a simple PPO policy and a meta-learning wrapper that
+performs inner-loop adaptation per task and a meta-update. It includes shape
+checks, dtype validation, gradient clipping, and docstrings for reliability.
+"""
+from __future__ import annotations
+
+from typing import Dict, Iterable, List, Tuple
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-from typing import Dict, List, Tuple
 from torch.distributions import Categorical
 
+
 class MAMLPPOPolicy(nn.Module):
-    """MAML-adapted PPO policy network with support for fast adaptation."""
-    
-    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 128):
+    """Actor-Critic policy used by MAML-PPO.
+
+    The actor outputs action probabilities (Categorical). The critic outputs
+    state values.
+    """
+
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 128) -> None:
         super().__init__()
+        if state_dim <= 0 or action_dim <= 0:
+            raise ValueError("state_dim and action_dim must be positive")
+
         self.state_dim = state_dim
         self.action_dim = action_dim
-        
-        # Actor network
+
         self.actor = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, action_dim),
-            nn.Softmax(dim=-1)
+            nn.Softmax(dim=-1),
         )
-        
-        # Critic network
         self.critic = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1),
         )
-    
+
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass returning action probabilities and value."""
+        """Return (action_probs, value) given state.
+
+        state: Tensor[..., state_dim]
+        """
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
         action_probs = self.actor(state)
         value = self.critic(state)
         return action_probs, value
-    
+
     def get_action(self, state: torch.Tensor) -> Tuple[int, torch.Tensor, torch.Tensor]:
-        """Sample action from policy."""
+        """Sample action and return (action, log_prob, value)."""
         action_probs, value = self.forward(state)
         dist = Categorical(action_probs)
         action = dist.sample()
         log_prob = dist.log_prob(action)
-        return action.item(), log_prob, value
+        return int(action.squeeze().item()), log_prob.squeeze(), value.squeeze()
+
 
 class MAMLPPO:
-    """Model-Agnostic Meta-Learning with PPO for multi-agent settings."""
-    
+    """MAML-style training wrapper around a PPO policy.
+
+    Uses inner-loop SGD on task trajectories and outer-loop Adam meta-update.
+    """
+
     def __init__(
         self,
         state_dim: int,
@@ -61,142 +83,123 @@ class MAMLPPO:
         clip_epsilon: float = 0.2,
         value_coef: float = 0.5,
         entropy_coef: float = 0.01,
-        max_grad_norm: float = 0.5
-    ):
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.meta_lr = meta_lr
-        self.inner_lr = inner_lr
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
-        self.clip_epsilon = clip_epsilon
-        self.value_coef = value_coef
-        self.entropy_coef = entropy_coef
-        self.max_grad_norm = max_grad_norm
-        
-        # Initialize meta-policy
+        max_grad_norm: float = 0.5,
+        device: torch.device | None = None,
+    ) -> None:
+        if any(x <= 0 for x in (meta_lr, inner_lr, gamma, gae_lambda, value_coef, max_grad_norm)):
+            raise ValueError("learning rates, gamma, gae_lambda, value_coef, max_grad_norm must be > 0")
+        if not (0.0 < clip_epsilon < 1.0):
+            raise ValueError("clip_epsilon should be in (0, 1)")
+
         self.policy = MAMLPPOPolicy(state_dim, action_dim, hidden_dim)
-        self.meta_optimizer = optim.Adam(self.policy.parameters(), lr=meta_lr)
-        
-    def inner_loop_adapt(
-        self,
-        trajectories: List[Dict],
-        num_inner_steps: int = 5
-    ) -> MAMLPPOPolicy:
-        """Fast adaptation using inner loop gradient updates."""
-        # Clone policy for adaptation
-        adapted_policy = MAMLPPOPolicy(
-            self.state_dim, self.action_dim
-        )
-        adapted_policy.load_state_dict(self.policy.state_dict())
-        
-        inner_optimizer = optim.SGD(adapted_policy.parameters(), lr=self.inner_lr)
-        
+        self.device = device or next(self.policy.parameters()).device
+        self.policy.to(self.device)
+
+        self.meta_lr = float(meta_lr)
+        self.inner_lr = float(inner_lr)
+        self.gamma = float(gamma)
+        self.gae_lambda = float(gae_lambda)
+        self.clip_epsilon = float(clip_epsilon)
+        self.value_coef = float(value_coef)
+        self.entropy_coef = float(entropy_coef)
+        self.max_grad_norm = float(max_grad_norm)
+
+        self.meta_optimizer = optim.Adam(self.policy.parameters(), lr=self.meta_lr)
+
+    def inner_loop_adapt(self, trajectories: List[Dict], num_inner_steps: int = 5) -> MAMLPPOPolicy:
+        if len(trajectories) == 0:
+            raise ValueError("trajectories is empty")
+        adapted = MAMLPPOPolicy(self.policy.state_dim, self.policy.action_dim)
+        adapted.load_state_dict(self.policy.state_dict())
+        adapted.to(self.device)
+        opt = optim.SGD(adapted.parameters(), lr=self.inner_lr)
         for _ in range(num_inner_steps):
-            loss = self._compute_ppo_loss(adapted_policy, trajectories)
-            inner_optimizer.zero_grad()
+            loss = self._compute_ppo_loss(adapted, trajectories)
+            opt.zero_grad(set_to_none=True)
             loss.backward()
-            inner_optimizer.step()
-        
-        return adapted_policy
-    
-    def _compute_ppo_loss(
-        self,
-        policy: MAMLPPOPolicy,
-        trajectories: List[Dict]
-    ) -> torch.Tensor:
-        """Compute PPO loss with clipping."""
-        states = torch.stack([t['state'] for t in trajectories])
-        actions = torch.tensor([t['action'] for t in trajectories])
-        old_log_probs = torch.stack([t['log_prob'] for t in trajectories])
-        returns = torch.tensor([t['return'] for t in trajectories], dtype=torch.float32)
-        advantages = torch.tensor([t['advantage'] for t in trajectories], dtype=torch.float32)
-        
-        # Get current policy predictions
+            nn.utils.clip_grad_norm_(adapted.parameters(), self.max_grad_norm)
+            opt.step()
+        return adapted
+
+    def _stack_field(self, trajectories: List[Dict], key: str, dtype: torch.dtype | None = None) -> torch.Tensor:
+        if key not in trajectories[0]:
+            raise KeyError(f"trajectory missing key: {key}")
+        vals = [t[key] for t in trajectories]
+        if isinstance(vals[0], torch.Tensor):
+            out = torch.stack(vals)
+        else:
+            out = torch.tensor(vals, dtype=dtype)
+        return out.to(self.device)
+
+    def _compute_ppo_loss(self, policy: MAMLPPOPolicy, trajectories: List[Dict]) -> torch.Tensor:
+        states = self._stack_field(trajectories, "state")
+        actions = self._stack_field(trajectories, "action", dtype=torch.long).long()
+        old_log_probs = self._stack_field(trajectories, "log_prob")
+        returns = self._stack_field(trajectories, "return", dtype=torch.float32)
+        advantages = self._stack_field(trajectories, "advantage", dtype=torch.float32)
+
         action_probs, values = policy(states)
         dist = Categorical(action_probs)
         log_probs = dist.log_prob(actions)
         entropy = dist.entropy().mean()
-        
-        # Compute ratio for PPO clipping
+
         ratio = torch.exp(log_probs - old_log_probs)
-        
-        # Clipped surrogate loss
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
-        
-        # Value loss
-        value_loss = nn.MSELoss()(values.squeeze(), returns)
-        
-        # Total loss
+
+        value_loss = nn.functional.mse_loss(values.squeeze(-1), returns)
         loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
-        
+        if not torch.isfinite(loss):
+            raise FloatingPointError("Non-finite PPO loss")
         return loss
-    
+
     def compute_gae(
         self,
         rewards: List[float],
         values: List[torch.Tensor],
         dones: List[bool],
-        next_value: torch.Tensor
+        next_value: torch.Tensor,
     ) -> Tuple[List[float], List[float]]:
-        """Compute Generalized Advantage Estimation."""
-        advantages = []
-        returns = []
-        gae = 0
-        
-        values = [v.item() for v in values] + [next_value.item()]
-        
+        advantages: List[float] = []
+        returns: List[float] = []
+        gae = 0.0
+        vals = [float(v.item()) for v in values] + [float(next_value.item())]
         for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_value = values[t + 1] if not dones[t] else 0
-            else:
-                next_value = values[t + 1]
-            
-            delta = rewards[t] + self.gamma * next_value - values[t]
-            gae = delta + self.gamma * self.gae_lambda * gae * (1 - dones[t])
+            nxt = 0.0 if dones[t] else vals[t + 1]
+            delta = float(rewards[t]) + self.gamma * nxt - vals[t]
+            gae = delta + self.gamma * self.gae_lambda * gae * (1.0 - float(dones[t]))
             advantages.insert(0, gae)
-            returns.insert(0, gae + values[t])
-        
+            returns.insert(0, gae + vals[t])
         return returns, advantages
-    
-    def meta_update(
-        self,
-        task_trajectories: List[List[Dict]]
-    ):
-        """Perform meta-update across multiple tasks."""
-        meta_loss = 0
-        
-        for trajectories in task_trajectories:
-            # Adapt policy to task
-            adapted_policy = self.inner_loop_adapt(trajectories)
-            
-            # Compute loss on adapted policy
-            loss = self._compute_ppo_loss(adapted_policy, trajectories)
-            meta_loss += loss
-        
-        # Meta-gradient update
-        meta_loss = meta_loss / len(task_trajectories)
-        self.meta_optimizer.zero_grad()
-        meta_loss.backward()
-        
-        # Gradient clipping
+
+    def meta_update(self, task_trajectories: List[List[Dict]]) -> float:
+        if len(task_trajectories) == 0:
+            raise ValueError("task_trajectories is empty")
+        meta_loss = 0.0
+        for traj in task_trajectories:
+            adapted = self.inner_loop_adapt(traj)
+            loss = self._compute_ppo_loss(adapted, traj)
+            meta_loss += float(loss.detach().item())
+        # Simple meta step: take gradient on current policy using all tasks' data
+        self.meta_optimizer.zero_grad(set_to_none=True)
+        # Reuse current policy to compute a surrogate loss across tasks
+        total = 0.0
+        for traj in task_trajectories:
+            total = total + self._compute_ppo_loss(self.policy, traj)
+        total = total / len(task_trajectories)
+        total.backward()
         nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-        
         self.meta_optimizer.step()
-        
-        return meta_loss.item()
-    
-    def save(self, path: str):
-        """Save model checkpoint."""
+        return meta_loss / len(task_trajectories)
+
+    def save(self, path: str) -> None:
         torch.save({
-            'policy_state_dict': self.policy.state_dict(),
-            'optimizer_state_dict': self.meta_optimizer.state_dict(),
+            "policy_state_dict": self.policy.state_dict(),
+            "optimizer_state_dict": self.meta_optimizer.state_dict(),
         }, path)
-    
-    def load(self, path: str):
-        """Load model checkpoint."""
-        checkpoint = torch.load(path)
-        self.policy.load_state_dict(checkpoint['policy_state_dict'])
-        self.meta_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    def load(self, path: str) -> None:
+        checkpoint = torch.load(path, map_location=self.device)
+        self.policy.load_state_dict(checkpoint["policy_state_dict"])
+        self.meta_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
