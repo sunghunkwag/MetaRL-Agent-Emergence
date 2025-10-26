@@ -11,7 +11,7 @@ git+https://github.com/Farama-Foundation/Metaworld.git
 pettingzoo>=1.24.0
 # Deep RL libraries
 stable-baselines3>=2.0.0
-torch-rl>=0.1.0
+# torch-rl>=0.1.0  # Commented out due to compatibility issues
 # SSM (State Space Models)
 mamba-ssm>=1.0.0
 einops>=0.7.0
