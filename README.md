@@ -1,6 +1,6 @@
 # MetaRL-Agent-Emergence
 
-[Open in Google Colab ▶](https://colab.research.google.com/github/sunghunkwag/MetaRL-Agent-Emergence/blob/main/MetaRL_Colab_Demo.ipynb)
+[![Open in Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sunghunkwag/MetaRL-Agent-Emergence/blob/main/MetaRL_Colab_Demo.ipynb)
 
 **Multi-Agent Meta-RL Framework with MAML, PPO, and SSM-based Policies**
 
@@ -55,6 +55,14 @@ pip install mujoco==3.1.6 metaworld==2.0.0
 ## Colab Notes
 - The Colab notebook also installs MuJoCo and MetaWorld and runs a tiny MT10 demo.
 - See caveats in the notebook about MuJoCo headless, GPU runtime, and time limits.
+
+### Recent Fix (Latest)
+**Import Order Fix for Colab Compatibility**: Fixed execution order issue in `MetaRL_Colab_Demo.ipynb` where `os.path.exists()` was called before `os` was imported. The fix adds `import os` at the beginning of cell 2 (clone cell) before any `os` module usage. This ensures:
+- Proper execution order when running cells sequentially in Google Colab
+- Prevention of `NameError: name 'os' is not defined` errors
+- Robust handling of all essential imports before usage
+
+All import, path, and command cells have been reviewed to ensure proper execution order and Colab compatibility.
 
 ## Citation
 If you use this repository, please cite appropriately.
