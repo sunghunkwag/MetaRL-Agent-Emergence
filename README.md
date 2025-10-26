@@ -1,4 +1,5 @@
 # MetaRL-Agent-Emergence
+
 [![Open in Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sunghunkwag/MetaRL-Agent-Emergence/blob/main/MetaRL_Colab_Demo.ipynb)
 
 **Multi-Agent Meta-RL Framework with MAML, PPO, and SSM-based Policies**
@@ -6,14 +7,28 @@
 ## Quickstart
 - Click the Colab badge above to run a ready-to-go demo: clone + install + tiny MT10 run + plots.
 
+## Recent Changes (2025-10-26)
+
+### Dependencies
+- **torch-rl package**: Commented out in `requirements.txt` due to compatibility issues
+  - The package was causing installation conflicts and is not actively used in the current codebase
+
+### Argument Parsing
+- **experiments/run_experiment.py**: Verified argument parsing structure
+  - Uses `--output-dir` argument (working correctly)
+  - No `--log-dir` argument exists (code properly uses `args.output_dir` throughout)
+
 ## Overview
+
 This repository implements a complete, runnable multi-agent meta-reinforcement learning framework featuring:
+
 - **MAML+PPO**: Model-Agnostic Meta-Learning with Proximal Policy Optimization
 - **SSM-based Policies**: State Space Model architectures for efficient sequence modeling
 - **Meta-World Integration**: SOTA benchmarks (MT10, MT50) for multi-task learning
 - **Complete Training Pipeline**: End-to-end experiment runner with logging and visualization
 
 ## Repository Structure
+
 ```
 MetaRL-Agent-Emergence/
 ├── meta_learners/          # Meta-learning algorithms
@@ -33,11 +48,13 @@ MetaRL-Agent-Emergence/
 ## Installation (Local)
 
 ### Prerequisites
+
 - Python 3.8+
 - PyTorch 2.0+
 - CUDA (optional, for GPU acceleration)
 
 ### Setup
+
 ```bash
 # Clone the repository
 git clone https://github.com/sunghunkwag/MetaRL-Agent-Emergence.git
@@ -47,53 +64,93 @@ cd MetaRL-Agent-Emergence
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies (includes torch, numpy, gym, gymnasium, mujoco==3.1.6,
-# metaworld from git repo, stable-baselines3, wandb, and more)
-pip install -U pip wheel setuptools
+# Install dependencies (includes torch, numpy, gym, gymnasium, mujoco==3.1.6, metaworld from git)
 pip install -r requirements.txt
 
 # Verify installation
 python test_installation.py
 ```
 
-### Key Dependencies
-- **MuJoCo**: Version 3.1.6 (pinned for stability)
-- **MetaWorld**: Installed from Farama-Foundation git repo (avoids yanked PyPI 2.0.0)
-- **PyTorch**: 2.0+ for deep learning
-- **Gymnasium**: 0.28+ for RL environments
-- **Weights & Biases**: 0.17+ for experiment logging
-
 ## Usage
 
-### Running Experiments
-```bash
-# Quick smoke test with MT10 (2 epochs)
-python experiments/run_experiment.py \
-    --benchmark MT10 \
-    --num-epochs 2 \
-    --log-dir outputs/mt10_test \
-    --seed 42
+### Quick Test
 
-# Full training run
+```bash
+# Run a small-scale experiment (2 tasks, 2 epochs)
+python experiments/run_experiment.py \
+    --benchmark ML1 \
+    --num-tasks 2 \
+    --num-epochs 2 \
+    --num-episodes-per-task 10 \
+    --output-dir ./results
+```
+
+### Full MT10 Training
+
+```bash
+# Train on Meta-World MT10 benchmark
 python experiments/run_experiment.py \
     --benchmark MT10 \
+    --num-tasks 10 \
     --num-epochs 100 \
-    --log-dir outputs/mt10_full \
-    --seed 42 \
-    --use-wandb
+    --num-episodes-per-task 50 \
+    --inner-lr 0.001 \
+    --outer-lr 0.0001 \
+    --output-dir ./results/mt10
 ```
 
 ### Command-Line Arguments
-- `--benchmark`: Choose MT10 or MT50
-- `--num-epochs`: Number of training epochs
-- `--log-dir`: Output directory for logs and checkpoints
-- `--seed`: Random seed for reproducibility
-- `--use-wandb`: Enable Weights & Biases logging (optional)
 
-## Colab Notes
-- The Colab notebook handles all installation automatically
-- Installs MuJoCo 3.1.6 and MetaWorld from git
-- Runs a quick MT10 demo with 2 epochs for speed
+- `--benchmark`: Meta-World benchmark (ML1, ML10, MT10, MT50)
+- `--num-tasks`: Number of tasks to sample
+- `--num-epochs`: Meta-training epochs
+- `--num-episodes-per-task`: Episodes per task during adaptation
+- `--inner-lr`: Inner loop learning rate (task adaptation)
+- `--outer-lr`: Outer loop learning rate (meta-update)
+- `--output-dir`: Directory for saving results and checkpoints
+- `--seed`: Random seed for reproducibility
+
+## Features
+
+### Meta-Learning (MAML+PPO)
+
+- Fast adaptation to new tasks with few samples
+- Inner loop: Task-specific policy adaptation via PPO
+- Outer loop: Meta-policy optimization across tasks
+
+### SSM-Based Policies
+
+- Efficient sequence modeling for temporal dependencies
+- Structured state space model architecture
+- Better sample efficiency than standard RNNs
+
+### Multi-Agent Coordination
+
+- Shared meta-parameters across agents
+- Independent task-specific adaptations
+- Emergent collaborative behaviors
+
+## Results
+
+The experiment runner automatically generates:
+
+- Training curves (meta-loss, returns)
+- Per-task adaptation plots
+- Checkpoint files for model weights
+- JSON logs of all metrics
+
+## Colab Demo
+
+For a quick start without local installation:
+
+1. Click the Colab badge at the top
+2. The notebook will:
+   - Clone this repository
+   - Install all dependencies
+   - Run a small MT10 experiment
+   - Generate and display plots
+
+**Note**: 
 - See notebook for caveats about MuJoCo headless rendering, GPU runtime, and session timeouts
 
 ## Known Issues & Solutions
@@ -113,6 +170,7 @@ python experiments/run_experiment.py \
 ## Troubleshooting
 
 If you encounter import errors:
+
 ```bash
 # Verify all packages installed correctly
 python -c "import torch; import mujoco; import metaworld; print('All imports OK')"
@@ -122,7 +180,9 @@ python -c "import mujoco; print(f'MuJoCo: {mujoco.__version__}')"
 ```
 
 ## Contributing
+
 Contributions welcome! Please:
+
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
@@ -130,10 +190,13 @@ Contributions welcome! Please:
 5. Submit a pull request
 
 ## License
+
 MIT License - see LICENSE file for details
 
 ## Citation
+
 If you use this code in your research, please cite:
+
 ```bibtex
 @misc{metarl-agent-emergence,
   author = {Kwag, Sunghun},
@@ -145,6 +208,7 @@ If you use this code in your research, please cite:
 ```
 
 ## Acknowledgments
+
 - Meta-World benchmark from Farama Foundation
 - MAML algorithm from Finn et al.
 - SSM architectures inspired by recent state space model research
