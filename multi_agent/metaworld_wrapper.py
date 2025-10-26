@@ -1,35 +1,52 @@
-"""Meta-World multi-agent wrappers with defensive checks and Gymnasium API.
+"""Meta-World multi-agent wrappers with defensive checks, logging, and hooks.
 """
 from __future__ import annotations
-
-from typing import Dict, List, Tuple, Optional
-
+from typing import Dict, List, Tuple, Optional, Callable
+import logging
+import time
 import numpy as np
 import torch
 import gymnasium as gym
 import metaworld
 
+logger = logging.getLogger("metaworld_multi_agent")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+# Type alias for simple hook callbacks
+Hook = Callable[[Dict], None]
 
 class MetaWorldMultiAgentWrapper:
     """Wrapper for Meta-World environments to support multi-agent meta-RL training.
-
     Provides utilities to sample tasks, reset per-task envs for N agents,
     and step them in lockstep, returning Gymnasium-style tuples.
-    """
 
+    Added features:
+    - Structured logging for resets/steps and timing
+    - Metrics hooks (on_reset, on_step) for auto-tuning/analysis modules
+    """
     def __init__(
         self,
         benchmark_name: str = "MT10",
         num_agents: int = 1,
         seed: Optional[int] = None,
+        on_reset: Optional[Hook] = None,
+        on_step: Optional[Hook] = None,
     ) -> None:
         if num_agents <= 0:
             raise ValueError("num_agents must be positive")
         self.benchmark_name = benchmark_name
         self.num_agents = int(num_agents)
         self.seed = seed
+        self.on_reset = on_reset
+        self.on_step = on_step
 
         # Initialize Meta-World benchmark
+        t0 = time.time()
         if benchmark_name == "MT10":
             self.benchmark = metaworld.MT10(seed=seed)
         elif benchmark_name == "MT50":
@@ -42,6 +59,7 @@ class MetaWorldMultiAgentWrapper:
             self.benchmark = metaworld.ML45(seed=seed)
         else:
             raise ValueError(f"Unknown benchmark: {benchmark_name}")
+        logger.info("Initialized benchmark %s in %.3fs", benchmark_name, time.time() - t0)
 
         self.task_names = list(self.benchmark.train_classes.keys())
         if len(self.task_names) == 0:
@@ -71,28 +89,35 @@ class MetaWorldMultiAgentWrapper:
 
     def reset_task(self, task_name: str) -> List[np.ndarray]:
         """Reset environments for all agents with a specific task."""
+        t0 = time.time()
         self.envs = [self.create_env(task_name, i) for i in range(self.num_agents)]
         states: List[np.ndarray] = []
         for env in self.envs:
             obs, _ = env.reset(seed=self.seed)
             states.append(obs)
+        dt = time.time() - t0
+        payload = {"event": "reset", "task": task_name, "num_agents": self.num_agents, "dt": dt}
+        logger.info("Reset task %s for %d agents in %.3fs", task_name, self.num_agents, dt)
+        if self.on_reset:
+            try:
+                self.on_reset(payload)
+            except Exception as e:
+                logger.warning("on_reset hook error: %s", e)
         return states
 
     def step(self, actions: List[int]) -> Tuple[List[np.ndarray], List[float], List[bool], List[Dict]]:
         """Step all agent environments with discrete actions.
-
         Returns: (states, rewards, dones, infos)
         """
         if self.envs is None:
             raise RuntimeError("Call reset_task() before step()")
         if len(actions) != len(self.envs):
             raise ValueError("actions length must match number of envs")
-
+        t0 = time.time()
         states: List[np.ndarray] = []
         rewards: List[float] = []
         dones: List[bool] = []
         infos: List[Dict] = []
-
         for env, action in zip(self.envs, actions):
             obs, reward, terminated, truncated, info = env.step(action)
             done = bool(terminated or truncated)
@@ -100,6 +125,19 @@ class MetaWorldMultiAgentWrapper:
             rewards.append(float(reward))
             dones.append(done)
             infos.append(info)
+        dt = time.time() - t0
+        payload = {
+            "event": "step",
+            "dt": dt,
+            "reward_sum": float(sum(rewards)),
+            "done_frac": float(sum(dones)) / max(1, len(dones)),
+        }
+        logger.debug("Step %d envs in %.3fs, R=%.3f", len(self.envs), dt, sum(rewards))
+        if self.on_step:
+            try:
+                self.on_step(payload)
+            except Exception as e:
+                logger.warning("on_step hook error: %s", e)
         return states, rewards, dones, infos
 
     def close(self) -> None:
@@ -111,7 +149,6 @@ class MetaWorldMultiAgentWrapper:
 
     def get_state_action_dims(self, task_name: Optional[str] = None) -> Tuple[int, int]:
         """Get state and action dimensions.
-
         Note: For continuous control in Meta-World, action_dim is typically > 1.
         This wrapper reports action space shape[0].
         """
@@ -128,10 +165,8 @@ class MetaWorldMultiAgentWrapper:
             env.close()
         return state_dim, action_dim
 
-
 class MetaWorldTaskSampler:
     """Sampler for Meta-World tasks to support meta-learning."""
-
     def __init__(
         self,
         benchmark_name: str = "MT10",
@@ -141,7 +176,6 @@ class MetaWorldTaskSampler:
     ) -> None:
         self.benchmark_name = benchmark_name
         self.seed = seed
-
         # Initialize benchmark
         if benchmark_name == "MT10":
             self.benchmark = metaworld.MT10(seed=seed)
@@ -155,17 +189,14 @@ class MetaWorldTaskSampler:
             self.benchmark = metaworld.ML45(seed=seed)
         else:
             raise ValueError(f"Unknown benchmark: {benchmark_name}")
-
         # Split tasks into train and test
         all_tasks = list(self.benchmark.train_classes.keys())
         if len(all_tasks) == 0:
             raise RuntimeError("No tasks available in benchmark")
-
         if num_train_tasks is None:
             num_train_tasks = max(1, int(0.8 * len(all_tasks)))
         if num_test_tasks is None:
             num_test_tasks = max(1, len(all_tasks) - num_train_tasks)
-
         import random
         if seed is not None:
             random.seed(seed)
@@ -197,7 +228,6 @@ class MetaWorldTaskSampler:
         if tasks:
             env.set_task(tasks[0])
         return env
-
 
 __all__ = [
     "MetaWorldMultiAgentWrapper",
