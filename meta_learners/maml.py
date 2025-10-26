@@ -1,258 +1,136 @@
-"""MAML (Model-Agnostic Meta-Learning) Implementation
+"""MAML/Reptile-style meta-learning utilities.
 
-This module implements MAML-style meta-learning for multi-agent reinforcement learning.
-MAML enables fast adaptation to new tasks through gradient-based meta-learning.
+This module provides a lightweight, robust implementation of a first-order
+Reptile-style meta-update for policy networks, suitable for meta-RL settings.
+It focuses on reliability, clear typing/docs, and defensive programming.
 """
+from __future__ import annotations
+
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
-from typing import List, Tuple, Dict, Optional
-import copy
+
+TensorDict = Mapping[str, torch.Tensor]
 
 
 class MAMLMetaLearner(nn.Module):
-    """MAML-based meta-learner for multi-agent RL.
-    
-    This class implements the MAML algorithm for meta-learning across multiple
-    tasks/environments. It supports first-order and second-order gradient updates.
-    
+    """First-order Reptile-like meta-learner for policy networks.
+
     Args:
-        policy_network: The policy network to be meta-learned
-        meta_lr: Meta-learning rate (outer loop)
-        inner_lr: Task adaptation learning rate (inner loop)
-        num_inner_steps: Number of gradient steps for task adaptation
-        first_order: If True, use first-order MAML (faster, less memory)
+        policy_network: A torch.nn.Module that maps states -> action logits.
+        meta_lr: Outer-loop interpolation step-size.
+        inner_lr: Inner-loop adaptation learning rate.
+        num_inner_steps: Number of gradient steps for adaptation per task.
+        device: Device to run computations on. If None, inferred from network.
+
+    Notes:
+        - This implementation uses a Reptile-style outer update for stability
+          and simplicity (no second-order gradients).
+        - Expects task batches to provide tensors with keys: 'states',
+          'actions', 'rewards'. Shapes should be broadcastable; actions should
+          be Long dtype for Categorical log_prob.
     """
-    
+
     def __init__(
         self,
         policy_network: nn.Module,
         meta_lr: float = 1e-3,
         inner_lr: float = 1e-2,
         num_inner_steps: int = 5,
-        first_order: bool = False
-    ):
+        device: Optional[torch.device] = None,
+    ) -> None:
         super().__init__()
-        self.policy_network = policy_network
-        self.meta_lr = meta_lr
-        self.inner_lr = inner_lr
-        self.num_inner_steps = num_inner_steps
-        self.first_order = first_order
-        
-        # Meta-optimizer for outer loop updates
-        self.meta_optimizer = optim.Adam(self.policy_network.parameters(), lr=meta_lr)
-        
-    def inner_loop_adaptation(
-        self,
-        task_data: Dict[str, torch.Tensor],
-        adapted_params: Optional[Dict[str, torch.Tensor]] = None
-    ) -> Dict[str, torch.Tensor]:
-        """Perform inner loop adaptation on a single task.
-        
-        Args:
-            task_data: Dictionary containing 'states', 'actions', 'rewards'
-            adapted_params: Optional pre-adapted parameters to continue from
-            
-        Returns:
-            Dictionary of adapted parameters
-        """
-        # Clone current parameters if not provided
-        if adapted_params is None:
-            adapted_params = {name: param.clone() 
-                            for name, param in self.policy_network.named_parameters()}
-        
-        # Inner loop: adapt to task
-        for step in range(self.num_inner_steps):
-            # Forward pass with adapted parameters
-            loss = self.compute_task_loss(task_data, adapted_params)
-            
-            # Compute gradients with respect to adapted parameters
-            grads = torch.autograd.grad(
-                loss,
-                adapted_params.values(),
-                create_graph=not self.first_order,
-                allow_unused=True
-            )
-            
-            # Update adapted parameters
-            adapted_params = {
-                name: param - self.inner_lr * grad if grad is not None else param
-                for (name, param), grad in zip(adapted_params.items(), grads)
-            }
-        
-        return adapted_params
-    
-    def compute_task_loss(
-        self,
-        task_data: Dict[str, torch.Tensor],
-        params: Optional[Dict[str, torch.Tensor]] = None
-    ) -> torch.Tensor:
-        """Compute loss for a task using given parameters.
-        
-        Args:
-            task_data: Dictionary with 'states', 'actions', 'rewards', 'dones'
-            params: Optional parameter dictionary to use
-            
-        Returns:
-            Task loss (policy gradient loss)
-        """
-        states = task_data['states']
-        actions = task_data['actions']
-        rewards = task_data['rewards']
-        
-        # Use functional approach if custom parameters provided
-        if params is not None:
-            logits = self._forward_with_params(states, params)
-        else:
-            logits = self.policy_network(states)
-        
-        # Compute policy gradient loss
-        dist = Categorical(logits=logits)
-        log_probs = dist.log_prob(actions)
-        loss = -(log_probs * rewards).mean()
-        
-        return loss
-    
-    def _forward_with_params(
-        self,
-        x: torch.Tensor,
-        params: Dict[str, torch.Tensor]
-    ) -> torch.Tensor:
-        """Forward pass using custom parameters (functional approach)."""
-        # This is a placeholder - actual implementation depends on network architecture
-        # For now, temporarily set parameters and do forward pass
-        original_params = {}
-        for name, param in self.policy_network.named_parameters():
-            original_params[name] = param.data.clone()
-            param.data = params[name]
-        
-        output = self.policy_network(x)
-        
-        # Restore original parameters
-        for name, param in self.policy_network.named_parameters():
-            param.data = original_params[name]
-        
-        return output
-    
-    def meta_update(
-        self,
-        task_batch: List[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]]
-    ) -> float:
-        """Perform meta-update across a batch of tasks.
-        
-        Args:
-            task_batch: List of (support_set, query_set) tuples for each task
-            
-        Returns:
-            Meta-loss value
-        """
-        self.meta_optimizer.zero_grad()
-        meta_loss = 0.0
-        
-        for support_set, query_set in task_batch:
-            # Inner loop: adapt on support set
-            adapted_params = self.inner_loop_adaptation(support_set)
-            
-            # Outer loop: evaluate on query set
-            query_loss = self.compute_task_loss(query_set, adapted_params)
-            meta_loss += query_loss
-        
-        # Average loss across tasks
-        meta_loss = meta_loss / len(task_batch)
-        
-        # Meta-gradient descent
-        meta_loss.backward()
-        self.meta_optimizer.step()
-        
-        return meta_loss.item()
-    
-    def adapt_to_new_task(
-        self,
-        task_data: Dict[str, torch.Tensor],
-        num_steps: Optional[int] = None
-    ) -> nn.Module:
-        """Adapt the meta-learned model to a new task.
-        
-        Args:
-            task_data: Support data for the new task
-            num_steps: Number of adaptation steps (defaults to num_inner_steps)
-            
-        Returns:
-            Adapted policy network
-        """
-        if num_steps is None:
-            num_steps = self.num_inner_steps
-        
-        # Create a copy of the policy network
-        adapted_policy = copy.deepcopy(self.policy_network)
-        optimizer = optim.SGD(adapted_policy.parameters(), lr=self.inner_lr)
-        
-        # Adapt to new task
-        for _ in range(num_steps):
-            optimizer.zero_grad()
-            loss = self.compute_task_loss(task_data, None)
-            loss.backward()
-            optimizer.step()
-        
-        return adapted_policy
+        if not isinstance(policy_network, nn.Module):
+            raise TypeError("policy_network must be a torch.nn.Module")
+        if meta_lr <= 0 or inner_lr <= 0:
+            raise ValueError("meta_lr and inner_lr must be positive")
+        if num_inner_steps <= 0:
+            raise ValueError("num_inner_steps must be > 0")
 
-
-class ReptileMetaLearner(nn.Module):
-    """Reptile meta-learner as an alternative to MAML.
-    
-    Reptile is a simpler first-order meta-learning algorithm that performs
-    well in practice while being more memory-efficient than MAML.
-    """
-    
-    def __init__(
-        self,
-        policy_network: nn.Module,
-        meta_lr: float = 1e-3,
-        inner_lr: float = 1e-2,
-        num_inner_steps: int = 5
-    ):
-        super().__init__()
         self.policy_network = policy_network
-        self.meta_lr = meta_lr
-        self.inner_lr = inner_lr
-        self.num_inner_steps = num_inner_steps
-    
-    def meta_update(
-        self,
-        task_batch: List[Dict[str, torch.Tensor]]
-    ) -> float:
-        """Reptile meta-update: move toward adapted parameters."""
-        initial_params = {name: param.clone() 
-                         for name, param in self.policy_network.named_parameters()}
-        
+        self.meta_lr = float(meta_lr)
+        self.inner_lr = float(inner_lr)
+        self.num_inner_steps = int(num_inner_steps)
+        self.device = device or next(policy_network.parameters()).device
+        self.to(self.device)
+
+    @torch.no_grad()
+    def _snapshot_params(self) -> Dict[str, torch.Tensor]:
+        return {n: p.detach().clone() for n, p in self.policy_network.named_parameters()}
+
+    def _validate_task_batch(self, task_batch: Iterable[TensorDict]) -> List[TensorDict]:
+        if task_batch is None:
+            raise ValueError("task_batch cannot be None")
+        batch_list: List[TensorDict] = list(task_batch)
+        if len(batch_list) == 0:
+            raise ValueError("task_batch is empty")
+        for i, td in enumerate(batch_list):
+            for key in ("states", "actions", "rewards"):
+                if key not in td:
+                    raise KeyError(f"task_batch[{i}] missing key: {key}")
+            if td["actions"].dtype != torch.long:
+                raise TypeError("actions must be torch.long for Categorical")
+        return batch_list
+
+    def meta_update(self, task_batch: Iterable[TensorDict]) -> float:
+        """Run inner-loop adaptation on each task and apply Reptile meta-update.
+
+        Returns the average inner-loop loss across all steps and tasks.
+        """
+        batch_list = self._validate_task_batch(task_batch)
+        initial_params = self._snapshot_params()
         total_loss = 0.0
-        
-        for task_data in task_batch:
-            # Adapt to task
+
+        for td in batch_list:
+            # Move tensors to device defensively
+            states = td["states"].to(self.device)
+            actions = td["actions"].to(self.device)
+            rewards = td["rewards"].to(self.device)
+
+            if states.ndim == 0 or actions.ndim == 0 or rewards.ndim == 0:
+                raise ValueError("states/actions/rewards must be tensors with at least 1 dimension")
+            if states.shape[0] != actions.shape[0] or actions.shape[0] != rewards.shape[0]:
+                raise ValueError("Batch size mismatch among states/actions/rewards")
+
+            # Fresh optimizer for task adaptation
             task_optimizer = optim.SGD(self.policy_network.parameters(), lr=self.inner_lr)
-            
+
             for _ in range(self.num_inner_steps):
-                task_optimizer.zero_grad()
-                states = task_data['states']
-                actions = task_data['actions']
-                rewards = task_data['rewards']
-                
-                logits = self.policy_network(states)
-                dist = Categorical(logits=logits)
-                log_probs = dist.log_prob(actions)
-                loss = -(log_probs * rewards).mean()
-                
-                loss.backward()
-                task_optimizer.step()
-                total_loss += loss.item()
-            
-            # Reptile update: interpolate toward adapted parameters
+                task_optimizer.zero_grad(set_to_none=True)
+                try:
+                    logits = self.policy_network(states)
+                    if not torch.is_tensor(logits):
+                        raise TypeError("policy_network must return a tensor of logits")
+                    dist = Categorical(logits=logits)
+                    log_probs = dist.log_prob(actions)
+                    loss = -(log_probs * rewards).mean()
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError("Non-finite loss encountered")
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=1.0)
+                    task_optimizer.step()
+                    total_loss += float(loss.detach().item())
+                except Exception as e:
+                    # Fail fast with context; do not leave partial grads around
+                    for p in self.policy_network.parameters():
+                        if p.grad is not None:
+                            p.grad.detach_()
+                            p.grad.zero_()
+                    raise RuntimeError(f"Inner-loop step failed: {type(e).__name__}: {e}") from e
+
+            # Reptile meta-update: interpolate toward adapted params
             with torch.no_grad():
                 for name, param in self.policy_network.named_parameters():
-                    param.data = initial_params[name] + self.meta_lr * (
-                        param.data - initial_params[name]
-                    )
-        
-        return total_loss / (len(task_batch) * self.num_inner_steps)
+                    base = initial_params[name]
+                    if param.data.shape != base.shape:
+                        raise RuntimeError(f"Param shape changed during adaptation: {name}")
+                    param.data = base + self.meta_lr * (param.data - base)
+
+        denom = len(batch_list) * self.num_inner_steps
+        return float(total_loss / max(denom, 1))
+
+
+__all__ = ["MAMLMetaLearner"]
